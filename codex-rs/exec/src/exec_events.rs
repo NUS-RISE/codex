@@ -19,6 +19,9 @@ pub enum ThreadEvent {
     /// Emitted when a turn is completed. Typically right after the assistant's response.
     #[serde(rename = "turn.completed")]
     TurnCompleted(TurnCompletedEvent),
+    /// Exact billable usage for one upstream model completion.
+    #[serde(rename = "model.usage")]
+    ModelUsage(ModelUsageEvent),
     /// Indicates that a turn failed with an error.
     #[serde(rename = "turn.failed")]
     TurnFailed(TurnFailedEvent),
@@ -48,6 +51,15 @@ pub struct TurnStartedEvent {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct TurnCompletedEvent {
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct ModelUsageEvent {
+    pub response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_index: Option<u64>,
+    pub usage_source: String,
     pub usage: Usage,
 }
 

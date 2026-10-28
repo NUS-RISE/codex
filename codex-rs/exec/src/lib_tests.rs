@@ -663,6 +663,7 @@ async fn thread_start_params_match_history_to_persistence() {
         Some(codex_app_server_protocol::ThreadSource::User)
     );
     assert_eq!(params.history_mode, Some(ThreadHistoryMode::Paginated));
+    assert!(params.experimental_raw_events);
 
     let thread_source = ThreadSource::Feature("automated_review".to_string());
     let params = thread_start_params_from_config(&config, &thread_source);
@@ -673,6 +674,7 @@ async fn thread_start_params_match_history_to_persistence() {
 
     assert_eq!(params.ephemeral, Some(true));
     assert_eq!(params.history_mode, None);
+    assert!(params.experimental_raw_events);
 }
 
 #[tokio::test]

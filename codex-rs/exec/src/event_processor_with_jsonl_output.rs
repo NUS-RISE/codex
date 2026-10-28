@@ -40,6 +40,7 @@ use crate::exec_events::McpToolCallItem;
 use crate::exec_events::McpToolCallItemError;
 use crate::exec_events::McpToolCallItemResult;
 use crate::exec_events::McpToolCallStatus as ExecMcpToolCallStatus;
+use crate::exec_events::ModelUsageEvent;
 use crate::exec_events::PatchApplyStatus as ExecPatchApplyStatus;
 use crate::exec_events::PatchChangeKind as ExecPatchChangeKind;
 use crate::exec_events::ReasoningItem;
@@ -62,6 +63,8 @@ pub struct EventProcessorWithJsonOutput {
     raw_to_exec_item_id: HashMap<String, String>,
     running_todo_list: Option<RunningTodoList>,
     last_total_token_usage: Option<ThreadTokenUsage>,
+    raw_usage_since_token_count: bool,
+    fallback_usage_index: u64,
     last_critical_error: Option<ThreadErrorEvent>,
     final_message: Option<String>,
     emit_final_message_on_shutdown: bool,
@@ -87,6 +90,8 @@ impl EventProcessorWithJsonOutput {
             raw_to_exec_item_id: HashMap::new(),
             running_todo_list: None,
             last_total_token_usage: None,
+            raw_usage_since_token_count: false,
+            fallback_usage_index: 0,
             last_critical_error: None,
             final_message: None,
             emit_final_message_on_shutdown: false,
@@ -506,7 +511,103 @@ impl EventProcessorWithJsonOutput {
                 CodexStatus::Running
             }
             ServerNotification::ModelVerification(_) => CodexStatus::Running,
+            ServerNotification::RawResponseCompleted(notification) => {
+                if let Some(usage) = notification.usage {
+                    self.raw_usage_since_token_count = true;
+                    events.push(ThreadEvent::ModelUsage(ModelUsageEvent {
+                        response_id: Some(notification.response_id),
+                        request_index: None,
+                        usage_source: "raw_response_completed".to_string(),
+                        usage: Usage {
+                            input_tokens: usage.input_tokens,
+                            cached_input_tokens: usage.cached_input_tokens,
+                            cache_write_input_tokens: usage.cache_write_input_tokens,
+                            output_tokens: usage.output_tokens,
+                            reasoning_output_tokens: usage.reasoning_output_tokens,
+                        },
+                    }));
+                }
+                CodexStatus::Running
+            }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                let current = &notification.token_usage;
+                let previous = self
+                    .last_total_token_usage
+                    .as_ref()
+                    .map(|usage| &usage.total);
+                let changed = previous.is_none_or(|total| total != &current.total);
+                if changed {
+                    let last = &current.last;
+                    // Some transports omit raw response notifications. Accept
+                    // `last` only when every category reconciles with the
+                    // cumulative increment; never average or split totals.
+                    let reconciles = [
+                        (
+                            current.total.input_tokens,
+                            last.input_tokens,
+                            previous.map_or(0, |usage| usage.input_tokens),
+                        ),
+                        (
+                            current.total.cached_input_tokens,
+                            last.cached_input_tokens,
+                            previous.map_or(0, |usage| usage.cached_input_tokens),
+                        ),
+                        (
+                            current.total.cache_write_input_tokens,
+                            last.cache_write_input_tokens,
+                            previous.map_or(0, |usage| usage.cache_write_input_tokens),
+                        ),
+                        (
+                            current.total.output_tokens,
+                            last.output_tokens,
+                            previous.map_or(0, |usage| usage.output_tokens),
+                        ),
+                        (
+                            current.total.reasoning_output_tokens,
+                            last.reasoning_output_tokens,
+                            previous.map_or(0, |usage| usage.reasoning_output_tokens),
+                        ),
+                        (
+                            current.total.total_tokens,
+                            last.total_tokens,
+                            previous.map_or(0, |usage| usage.total_tokens),
+                        ),
+                    ]
+                    .into_iter()
+                    .all(|(total, last, previous)| total.checked_sub(previous) == Some(last));
+                    let nonnegative = [
+                        last.input_tokens,
+                        last.cached_input_tokens,
+                        last.cache_write_input_tokens,
+                        last.output_tokens,
+                        last.reasoning_output_tokens,
+                        last.total_tokens,
+                    ]
+                    .into_iter()
+                    .all(|tokens| tokens >= 0)
+                        && last.cached_input_tokens <= last.input_tokens;
+                    if !self.raw_usage_since_token_count
+                        && reconciles
+                        && nonnegative
+                        && last.total_tokens > 0
+                    {
+                        self.fallback_usage_index += 1;
+                        events.push(ThreadEvent::ModelUsage(ModelUsageEvent {
+                            // The transport did not expose an API response ID.
+                            response_id: None,
+                            request_index: Some(self.fallback_usage_index),
+                            usage_source: "token_usage_last_reconciled".to_string(),
+                            usage: Usage {
+                                input_tokens: last.input_tokens,
+                                cached_input_tokens: last.cached_input_tokens,
+                                cache_write_input_tokens: last.cache_write_input_tokens,
+                                output_tokens: last.output_tokens,
+                                reasoning_output_tokens: last.reasoning_output_tokens,
+                            },
+                        }));
+                    }
+                    self.raw_usage_since_token_count = false;
+                }
                 self.last_total_token_usage = Some(notification.token_usage);
                 CodexStatus::Running
             }

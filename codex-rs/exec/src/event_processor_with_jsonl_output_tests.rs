@@ -1,4 +1,7 @@
 use super::*;
+use codex_app_server_protocol::RawResponseCompletedNotification;
+use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
+use codex_app_server_protocol::TokenUsageBreakdown;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::tempdir;
@@ -86,6 +89,156 @@ fn runtime_warning_emits_a_non_fatal_error_item() {
             })],
             status: CodexStatus::Running,
         }
+    );
+}
+
+#[test]
+fn request_usage_falls_back_only_for_reconciled_new_token_counts() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    let last = TokenUsageBreakdown {
+        input_tokens: 120,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 5,
+        output_tokens: 30,
+        reasoning_output_tokens: 10,
+        total_tokens: 150,
+    };
+    let notification =
+        ServerNotification::ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            token_usage: ThreadTokenUsage {
+                total: last.clone(),
+                last: last.clone(),
+                model_context_window: None,
+            },
+        });
+    let expected = CollectedThreadEvents {
+        status: CodexStatus::Running,
+        events: vec![ThreadEvent::ModelUsage(ModelUsageEvent {
+            response_id: None,
+            request_index: Some(1),
+            usage_source: "token_usage_last_reconciled".to_string(),
+            usage: Usage {
+                input_tokens: 120,
+                cached_input_tokens: 100,
+                cache_write_input_tokens: 5,
+                output_tokens: 30,
+                reasoning_output_tokens: 10,
+            },
+        })],
+    };
+    assert_eq!(
+        processor.collect_thread_events(notification.clone()),
+        expected
+    );
+    assert_eq!(
+        processor.collect_thread_events(notification),
+        CollectedThreadEvents {
+            events: Vec::new(),
+            status: CodexStatus::Running
+        }
+    );
+
+    let inconsistent =
+        ServerNotification::ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            token_usage: ThreadTokenUsage {
+                total: TokenUsageBreakdown {
+                    input_tokens: 999,
+                    ..last.clone()
+                },
+                last,
+                model_context_window: None,
+            },
+        });
+    assert_eq!(
+        processor.collect_thread_events(inconsistent),
+        CollectedThreadEvents {
+            events: Vec::new(),
+            status: CodexStatus::Running
+        }
+    );
+}
+
+#[test]
+fn direct_response_usage_is_not_repeated_by_token_count_fallback() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    let usage = TokenUsageBreakdown {
+        input_tokens: 120,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 5,
+        output_tokens: 30,
+        reasoning_output_tokens: 10,
+        total_tokens: 150,
+    };
+    let direct = processor.collect_thread_events(ServerNotification::RawResponseCompleted(
+        RawResponseCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            response_id: "resp-1".to_string(),
+            usage: Some(usage.clone()),
+            usage_metadata: None,
+        },
+    ));
+    assert_eq!(direct.events.len(), 1);
+    let counted = processor.collect_thread_events(ServerNotification::ThreadTokenUsageUpdated(
+        ThreadTokenUsageUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            token_usage: ThreadTokenUsage {
+                total: usage.clone(),
+                last: usage,
+                model_context_window: None,
+            },
+        },
+    ));
+    assert_eq!(
+        counted,
+        CollectedThreadEvents {
+            events: Vec::new(),
+            status: CodexStatus::Running
+        }
+    );
+}
+
+#[test]
+fn raw_response_completion_emits_exact_request_usage() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::RawResponseCompleted(
+        RawResponseCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            response_id: "resp-1".to_string(),
+            usage: Some(TokenUsageBreakdown {
+                total_tokens: 150,
+                input_tokens: 120,
+                cached_input_tokens: 100,
+                cache_write_input_tokens: 5,
+                output_tokens: 30,
+                reasoning_output_tokens: 10,
+            }),
+            usage_metadata: None,
+        },
+    ));
+
+    assert_eq!(collected.status, CodexStatus::Running);
+    assert_eq!(
+        collected.events,
+        vec![ThreadEvent::ModelUsage(ModelUsageEvent {
+            response_id: Some("resp-1".to_string()),
+            request_index: None,
+            usage_source: "raw_response_completed".to_string(),
+            usage: Usage {
+                input_tokens: 120,
+                cached_input_tokens: 100,
+                cache_write_input_tokens: 5,
+                output_tokens: 30,
+                reasoning_output_tokens: 10,
+            },
+        })]
     );
 }
 

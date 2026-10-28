@@ -1379,6 +1379,7 @@ fn thread_start_params_from_config(
         ephemeral: Some(config.ephemeral),
         history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),
         thread_source: Some(thread_source.clone()),
+        experimental_raw_events: true,
         ..ThreadStartParams::default()
     }
 }
